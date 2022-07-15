@@ -4,7 +4,7 @@ def set_inference_options(parser):
     parser.add_argument('--dataset_name', default='after_fd_reconstruction', type=str)
 
     parser.add_argument('--use_gpu', dest='use_gpu', action='store_true')
-    parser.set_defaults(use_gpu=True)  
+    parser.set_defaults(use_gpu=False)   #设置gpu为False来跑
 
     """ Display """
     parser.add_argument('--display', dest='display', action='store_true')

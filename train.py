@@ -21,6 +21,8 @@ from datetime import timezone
 from torch.autograd import Variable
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+torch.set_printoptions(profile="full")  #完整打印
+
 def print_model_grad(epoch, model, str):
     grad_file = open(join(args.output_folder, 'train_grad.txt'), 'a')
     grad_file.write('{}:\n'.format(str))
@@ -57,23 +59,28 @@ def weight_init(m):
         #print(333)
         nn.init.constant_(m.weight, 1)
         nn.init.constant_(m.bias, 0)
-def postprocess(data):
+def postprocess(data): #数据恢复原有格式
+    
     #三列，第一列为0-240，第二列为0-180，第三列为0或1
     #xs
     xs = data[:, 0]
     max_xs = torch.max(xs)
     min_xs = torch.min(xs)
-    data[:, 0] = (xs - min_xs) / (max_xs - min_xs) * 240
+    data[:, 0] = (xs - min_xs) / (max_xs - min_xs) * 239  #最大值不是240，是239.......
     #ys
     ys = data[:, 1]
     max_ys = torch.max(ys)
     min_ys = torch.min(ys)
-    data[:, 1] = (ys - min_ys) / (max_ys - min_ys) * 180    
-    
+    # print('min_ys',type(min_ys))
+    # print('min_ys',min_ys)
+    data[:, 1] = (ys - min_ys) / (max_ys - min_ys) * 179    
+
     #pols维度,回归到0、1
     pols = data[:, 2]
     mean_pols = torch.mean(pols)
-    pols = pols > mean_pols
+    
+    #pols = [1 if x > mean_pols else 0 for x in pols ] 列表推导式，是python的处理
+    pols = pols > mean_pols  #输出均为True，False这种,看结果确实是回到了0、1
     data[:, 2] = pols
     output = data
     return output
@@ -84,19 +91,27 @@ class fd_Net(nn.Module):
 
         self.fc1 = nn.Linear(3,64)
         self.fc2 = nn.Linear(64,3)
-        self.relu = nn.ReLU(inplace=False)
+        self.relu = nn.ReLU()
         #self.dropout = nn.Dropout(0.5) 加dropout会报错
     def forward(self,input):
+
         input_1 = input[:,:1] #此列数据不变
         x = input[:,1:]
         # print(x.shape)
         x = self.fc1(x)
-        x = self.relu(x)
+        x1 = self.relu(x.clone()) #使用clone防止占位，之前是使用ReLU
         #x = self.dropout(x)
-        x = self.fc2(x)
-        x = postprocess(x)
-        output = torch.cat([input_1,x],dim=1)
-        
+        x1 = self.fc2(x1)
+        x1 = postprocess(x1)
+        output = torch.cat([input_1,x1],dim=1)
+        # print('第二列：','max:',input[:,1].max(),'min:',input[:,1].min())
+        # print('第三列：','max:',input[:,2].max(),'min:',input[:,2].min())
+        # print('第四列：','max:',input[:,3].max(),'min:',input[:,3].min())#,'all:',input[:,3])
+        # print('output：')
+        # print('第二列：','max:',output[:,1].max(),'min:',output[:,1].min())
+        # print('第三列：','max:',output[:,2].max(),'min:',output[:,2].min())
+        # print('第四列：','max:',output[:,3].max(),'min:',output[:,3].min())
+       
         return output
     
 if __name__ == "__main__":
@@ -143,7 +158,7 @@ if __name__ == "__main__":
     #本代码，运行两个并行的model框架进行，一个以另一个的结果进行train
 
     # Load model
-    device = get_device(args.use_gpu)
+    device = get_device(args.use_gpu)  #此处打印device1的归属
     model_image = load_model(args.path_to_model, device)
     model_image = model_image.to(device)
     model_image.eval()  #调为eval模式,但使用backward仍然会更新参数
@@ -185,7 +200,6 @@ if __name__ == "__main__":
     print_model_weight(-1, model_train,'model_train')
     print_model_weight(-1, model_image,'model_image')
     """ Read chunks of events using Pandas """
-
     # Loop through the events and reconstruct images
     N = args.window_size  #一个window的大小
     if not args.fixed_duration:
@@ -230,77 +244,84 @@ if __name__ == "__main__":
     #bug: 非训练模式下与训练模式一样的时间？why？
     #     训练模式的时间
     if args.train_model:  #训练模式
-        #取消计时
-        for epoch in tqdm(range(0, args.epoches)):
-            count = 0 #每次初始化一次
-            
-            #每次epoch后迭代器和索引都要更新，才能进行下一轮重复
-            start_index = initial_offset + sub_offset
-            #此处增加了一个options，方便传参不要输出
-            event_window_iterator = FixedSizeEventReader(path_to_events, options = args , num_events=N, start_index=start_index)
-            #遍历每个窗口，对于每个窗口，event_window.shape=(15119, 4),4是指t,x,y,p的四个维度
-            for event_window in event_window_iterator: 
-                train_event_window = torch.from_numpy(event_window)
-                train_event_window = train_event_window.type(torch.float)
-                train_event_window = train_event_window.to(device)
-                train_event_window.requires_grad = True
-                #退化模型处理
-                train_event_window = fd_net(train_event_window)                        
-                #num_bins=5
-                #每个窗口都要更新这个reconstructor的地方，但调整到这儿，原本输出的很多内容会有点乱
-                reconstructor_train = ImageReconstructor(model_train, height, width, model_train.num_bins, args)
-                reconstructor_image = ImageReconstructor(model_image, height, width, model_image.num_bins, args)
-                last_timestamp = event_window[-1, 0]
+        with torch.autograd.set_detect_anomaly(True):    
+            #取消计时
+            for epoch in tqdm(range(0, args.epoches)):
+                count = 0 #每次初始化一次
+                
+                #每次epoch后迭代器和索引都要更新，才能进行下一轮重复
+                start_index = initial_offset + sub_offset
+                #此处增加了一个options，方便传参不要输出
+                event_window_iterator = FixedSizeEventReader(path_to_events, options = args , num_events=N, start_index=start_index)
+                #遍历每个窗口，对于每个窗口，event_window.shape=(15119, 4),4是指t,x,y,p的四个维度
+                for event_window in event_window_iterator:  
+                    train_event_window = torch.from_numpy(event_window)
+                    train_event_window = train_event_window.type(torch.float)
+                    train_event_window = train_event_window.to(device)
+                    train_event_window.requires_grad = True
+                    #退化模型处理
+                    train_event_window = fd_net(train_event_window)                        
+                    #num_bins=5
+                    #每个窗口都要更新这个reconstructor的地方，但调整到这儿，原本输出的很多内容会有点乱
+                    reconstructor_train = ImageReconstructor(model_train, height, width, model_train.num_bins, args)
+                    reconstructor_image = ImageReconstructor(model_image, height, width, model_image.num_bins, args)
+                    last_timestamp = event_window[-1, 0]
                     #此处默认在GPU上跑的，划分体素网格,内部已禁用梯度计算
-                image_event_tensor = events_to_voxel_grid_pytorch(event_window,
-                                                            num_bins=model_train.num_bins,
-                                                            width=width,
-                                                            height=height,
-                                                            device=device)
-                train_event_tensor = events_to_voxel_grid_pytorch(train_event_window,
-                                                            num_bins=model_train.num_bins,
-                                                            width=width,
-                                                            height=height,
-                                                            device=device)
-                    #'''这里可以用论文辅助理解events_to_voxel_grid_pytorch，对于num_bins也在论文里有解释！！！'''
+                    image_event_tensor = events_to_voxel_grid_pytorch(event_window,
+                                                                num_bins=model_train.num_bins,
+                                                                width=width,
+                                                                height=height,
+                                                                device=device)
+                    train_event_tensor = events_to_voxel_grid_pytorch(train_event_window,
+                                                                num_bins=model_train.num_bins,
+                                                                width=width,
+                                                                height=height,
+                                                                device=device)
+                        #'''这里可以用论文辅助理解events_to_voxel_grid_pytorch，对于num_bins也在论文里有解释！！！'''
+                    #print('train_event_window',train_event_window)
+                    # print('image_event_tensor:',image_event_tensor)
+                    #print('train_event_tensor:',train_event_tensor.requires_grad) #注意到此处打印出的tensor没有跟grad
+                    num_events_in_window = event_window.shape[0] #15119
+                    
+                    
+                    image = reconstructor_image.update_reconstruction(image_event_tensor, start_index + num_events_in_window, last_timestamp)
+                    #print('image',image) 注意到此处打印出的tensor没有跟grad
+                    image = image.type(torch.float).to(device)
+                    #此时打印model_train，发现所有参数的requires_grad都是True
+                    #此时打印model_image，发现所有参数的requires_grad都是False
+                    output = reconstructor_train.update_reconstruction(train_event_tensor, start_index + num_events_in_window, last_timestamp)
+                    output = output.type(torch.float).to(device)
+                    
+                    #image.shape: torch.Size([180, 240])
+                    #output.shape: torch.Size([180, 240])
+                    
+                    loss_func = nn.MSELoss() #psnr = 10 * np.log10(255 * 255 / mse) #psnr越小越差，不能直接作为评估标准
+                    if args.fd_train: 
+                        loss = -loss_func(output,image) #取负
+                    else:
+                        loss = loss_func(output,image)
+                    #反向传播
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    
+                    print('loss:',loss)  #有grad
+                    
+                    start_index += num_events_in_window  #下一个窗口
+                # #打印grad，训练前和训练时
+                # print_model_weight(epoch, model_train,'model_train')
+                # print_model_weight(epoch, model_image,'model_image')
+                # #print_model(epoch, model_train)
                 
-                num_events_in_window = event_window.shape[0] #15119
-                #类的方法可能有问题，实例化为对象可能只适合eval()
-                
-                image = reconstructor_image.update_reconstruction(image_event_tensor, start_index + num_events_in_window, last_timestamp)
-                image = image.type(torch.float).to(device)
-                #此时打印model_train，发现所有参数的requires_grad都是True
-                #此时打印model_image，发现所有参数的requires_grad都是False
-                output = reconstructor_train.update_reconstruction(train_event_tensor, start_index + num_events_in_window, last_timestamp)
-                output = output.type(torch.float).to(device)
-                
-                #image.shape: torch.Size([180, 240])
-                #output.shape: torch.Size([180, 240])
-                loss_func = nn.MSELoss() #psnr = 10 * np.log10(255 * 255 / mse) #psnr越小越差，不能直接作为评估标准
                 if args.fd_train: 
-                    loss = -loss_func(output,image) #取负
+                    print(epoch,'fd_train loss:',loss.item())
+                    loss_file = open(join(args.output_folder, 'fd_loss.txt'), 'a')
+                    loss_file.write('epoch:{}  loss:{:.8f}\n'.format(epoch, loss))
                 else:
-                    loss = loss_func(output,image)
-                #反向传播
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                start_index += num_events_in_window  #下一个窗口
-            # #打印grad，训练前和训练时
-            # print_model_weight(epoch, model_train,'model_train')
-            # print_model_weight(epoch, model_image,'model_image')
-            # #print_model(epoch, model_train)
-            
-            if args.fd_train: 
-                print(epoch,'fd_train loss:',loss.item())
-                loss_file = open(join(args.output_folder, 'fd_loss.txt'), 'a')
-                loss_file.write('epoch:{}  loss:{:.8f}\n'.format(epoch, loss))
-            else:
-                print(epoch,'E2VID_train loss:',loss.item())
-                loss_file = open(join(args.output_folder, 'E2VID_loss.txt'), 'a')
-                loss_file.write('epoch:{}  loss:{:.8f}\n'.format(epoch, loss))
-    else:
+                    print(epoch,'E2VID_train loss:',loss.item())
+                    loss_file = open(join(args.output_folder, 'E2VID_loss.txt'), 'a')
+                    loss_file.write('epoch:{}  loss:{:.8f}\n'.format(epoch, loss))
+    else: #测试模式
         reconstructor = ImageReconstructor(model_train, height, width, model_train.num_bins, args)
         with CudaTimer('Processing entire dataset'):  #有计时作用
             #遍历每个窗口，对于每个窗口，event_window.shape=(15119, 4),4是指t,x,y,p的四个维度

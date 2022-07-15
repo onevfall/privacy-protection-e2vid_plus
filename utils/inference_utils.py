@@ -602,53 +602,62 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
         # events_torch = torch.from_numpy(events)
         events_torch = events
         with torch.no_grad():
-            voxel_grid = torch.zeros(num_bins, height, width, dtype=torch.float32, device=device).flatten()
+        # if 1:
+            with DeviceTimer('Voxel grid voting'):
+                voxel_grid = torch.zeros(num_bins, height, width, dtype=torch.float32, device=device).flatten()
 
-            # normalize the event timestamps so that they lie between 0 and num_bins
-            last_stamp = events_torch[-1, 0]
-            first_stamp = events_torch[0, 0]
-            deltaT = last_stamp - first_stamp
+                # normalize the event timestamps so that they lie between 0 and num_bins
+                last_stamp = events_torch[-1, 0]
+                first_stamp = events_torch[0, 0]
+                deltaT = last_stamp - first_stamp
 
-            if deltaT == 0: #防止遇上0导致错误
-                deltaT = 1.0
+                if deltaT == 0: #防止遇上0导致错误
+                    deltaT = 1.0
 
-            events_torch[:, 0] = (num_bins - 1) * (events_torch[:, 0] - first_stamp) / deltaT
-            ts = events_torch[:, 0]
-            xs = events_torch[:, 1].long()
-            ys = events_torch[:, 2].long()
-            pols = events_torch[:, 3].float()
+                events_torch[:, 0] = (num_bins - 1) * (events_torch[:, 0] - first_stamp) / deltaT
+                ts = events_torch[:, 0]
+                xs = events_torch[:, 1].long()
+                ys = events_torch[:, 2].long()
+                pols = events_torch[:, 3].float()
+                
+                pols[pols == 0] = -1  # polarity should be +1 / -1
+
+                tis = torch.floor(ts)  #向下取整
+                tis_long = tis.long()  #转为Int64
+                dts = ts - tis         #找到小数
+                vals_left = pols * (1.0 - dts.float())
+                vals_right = pols * dts.float()
+
+                valid_indices = tis < num_bins #原句
+                valid_indices =  valid_indices & (tis >= 0)   #将tis>0的值(bool型)与valid_indices值进行按位与运算,防止inplace，则拆开
+                #dim=0,对进行index选取，进行加和
+                # print('valid_indices len:',len(valid_indices),'  valid_indices:',valid_indices)
+                # print('xs:',len(xs[valid_indices]))
+                index=xs[valid_indices] + ys[valid_indices]* width + tis_long[valid_indices] * width * height
+                
+                source=vals_left[valid_indices]
+                # print('voxel_grid shape:',voxel_grid.shape)
+                # print('source shape:',source.shape)#' source',source)
+                # print('index shape:',index.shape)
+                # print('index max:',index.max())
+                # print('index min:',index.min())
+                voxel_grid_1= torch.index_add(voxel_grid,dim=0,
+                                        index=xs[valid_indices] + ys[valid_indices]
+                                        * width + tis_long[valid_indices] * width * height,
+                                        source=vals_left[valid_indices])
+                #voxel_grid.shape = torch.Size([216000])
+                valid_indices = (tis + 1) < num_bins
+                valid_indices =  valid_indices & (tis >= 0)
+
+                voxel_grid_2= torch.index_add(voxel_grid_1,dim=0,
+                                        index=xs[valid_indices] + ys[valid_indices] * width
+                                        + (tis_long[valid_indices] + 1) * width * height,
+                                        source=vals_right[valid_indices])
+                #voxel_grid.shape = torch.Size([216000])
             
-            pols[pols == 0] = -1  # polarity should be +1 / -1
-
-            tis = torch.floor(ts)  #向下取整
-            tis_long = tis.long()  #转为Int64
-            dts = ts - tis         #找到小数
-            vals_left = pols * (1.0 - dts.float())
-            vals_right = pols * dts.float()
-
-            valid_indices = tis < num_bins #原句
-            valid_indices &= tis >= 0   #将tis>0的值(bool型)与valid_indices值进行按位与运算
-            
-
-            #没看懂这部分的内容，体元在操作什么？
-            #dim=0,对进行index选取，进行加和
-            voxel_grid.index_add_(dim=0,
-                                    index=xs[valid_indices] + ys[valid_indices]
-                                    * width + tis_long[valid_indices] * width * height,
-                                    source=vals_left[valid_indices])
-            #voxel_grid.shape = torch.Size([216000])
-            valid_indices = (tis + 1) < num_bins
-            valid_indices &= tis >= 0
-
-            voxel_grid.index_add_(dim=0,
-                                    index=xs[valid_indices] + ys[valid_indices] * width
-                                    + (tis_long[valid_indices] + 1) * width * height,
-                                    source=vals_right[valid_indices])
-            #voxel_grid.shape = torch.Size([216000])
-            
-        voxel_grid = voxel_grid.view(num_bins, height, width)
+            voxel_grid_3 = voxel_grid_2.view(num_bins, height, width)
         #voxel_grid.shape=torch.Size([5, 180, 240])
-    else:
+    else: #若为ndarray
         with torch.no_grad(): #禁用梯度计算，有利于减少内存消耗
             events_torch = torch.from_numpy(events)
             with DeviceTimer('Events -> Device (voxel grid)'):
@@ -681,6 +690,13 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
                 valid_indices = tis < num_bins #原句
                 valid_indices &= tis >= 0   #将tis>0的值(bool型)与valid_indices值进行按位与运算
                 
+                index=xs[valid_indices] + ys[valid_indices]* width + tis_long[valid_indices] * width * height
+                torch.set_printoptions(profile="full")
+                source=vals_left[valid_indices]
+                
+                # print('source shape:',source.shape)#' source',source)
+                # print('index shape:',index.shape,' index',index)
+                # exit(0)
 
                 #没看懂这部分的内容，体元在操作什么？
                 #dim=0,对进行index选取，进行加和
@@ -698,5 +714,5 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
                                         source=vals_right[valid_indices])
                 #voxel_grid.shape = torch.Size([216000])
                 
-            voxel_grid = voxel_grid.view(num_bins, height, width)
-    return voxel_grid
+            voxel_grid_3 = voxel_grid.view(num_bins, height, width)
+    return voxel_grid_3
