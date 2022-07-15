@@ -40,7 +40,7 @@ def print_model_weight(epoch, model, str):
     count = 0
     for name, weight in model.named_parameters():
         count += 1
-        if count <= 1:  #只打印一个
+        if count <= 3:
             weight_file.write('weight:{}\n'.format(weight))
  # 1. 根据网络层的不同定义不同的初始化方式     
 def weight_init(m):
@@ -77,22 +77,26 @@ def postprocess(data):
     data[:, 2] = pols
     output = data
     return output
-class fd_Net(nn.Module):  #对于处理这部分[5,180,240],可加入一维
-    #对于多通道数据 h * w * channel,用卷积核 1 * 1 * channel * filter 进行卷积
+class fd_Net(nn.Module):
     def __init__(self):
         super(fd_Net,self).__init__()
-        #1.暂不使用卷积层 2.使用两个fc层
+        #1.是否会使用卷积层 2.fc层如何定义维度数量 3.此处只对于x,y,p做一个训练
 
-        self.fc1 = nn.Linear(5*180*240,64)
-        self.fc2 = nn.Linear(64,5*180*240)
+        self.fc1 = nn.Linear(3,64)
+        self.fc2 = nn.Linear(64,3)
         self.relu = nn.ReLU(inplace=False)
         #self.dropout = nn.Dropout(0.5) 加dropout会报错
     def forward(self,input):
-        x = torch.flatten(input)
+        input_1 = input[:,:1] #此列数据不变
+        x = input[:,1:]
+        # print(x.shape)
         x = self.fc1(x)
         x = self.relu(x)
+        #x = self.dropout(x)
         x = self.fc2(x)
-        output = x.reshape(5,180,240)
+        x = postprocess(x)
+        output = torch.cat([input_1,x],dim=1)
+        
         return output
     
 if __name__ == "__main__":
@@ -121,7 +125,7 @@ if __name__ == "__main__":
     #若fd_train为true，则固定E2VID，训练退化fd_net；若为false，则固定fd_net,训练E2VID
     parser.add_argument('--fd_train', dest='fd_train', action='store_true') 
     parser.set_defaults(fd_train=False)  
-    parser.add_argument("--epoches", default=20, type=int, help="The number of epochs")
+    parser.add_argument("--epoches", default=3, type=int, help="The number of epochs")
     parser.add_argument("--learning_rate", default=0.001, type=float, help="learning_rate")
 
     set_inference_options(parser)
@@ -159,34 +163,27 @@ if __name__ == "__main__":
     # # instantiate model
     # model_train = eval('E2VIDRecurrent')(config)
 
-    model_train = load_model(args.path_to_model, device) #结构和权重先加载与image一样的
-    fd_net = fd_Net().to(device)  #退化模型放上gpu
-    
+    #直接用model_path加载也试试
+
+    model_train = load_model(args.path_to_model, device) #结构和权重先加载之前的
     if False == args.train_model: #加载训练的模型权重，进行测试
         #model = torch.load('train/trained_model/model.pth')
-        model_train.load_state_dict(torch.load("train/trained_E2VID_model/2022-06-01 19:49:10.412563+08:00model_param.pkl")) 
+        model_train.load_state_dict(torch.load("train/trained_E2VID_model/2022-05-19 01:34:28.303251+08:00model_param.pkl")) 
         print('已加载训练模型权重')
-        print('进入测试模式')
         model_train.eval()
-    elif False == args.fd_train: 
-        #若fd非train模式，则此时是训练E2VID模型，那么随机初始化；
-        #若fd为train模式，则E2VID直接加载与image一样的，此处不改变即可，默认就是加载与image一样的
+    elif False == args.fd_train: #若fd非train模式，则此时是训练E2VID模型，那么随机初始化；若fd为train模式，则E2VID直接加载与image一样的
         model_train.apply(weight_init)  #随机初始化,打乱权重
         model_train.train()
-        print('进入训练模式:训练E2VID')
-        #加载fd_net的权重
-        fd_net.load_state_dict(torch.load("train/trained_fd_model/2022-06-01 16:40:43.909909+08:00model_param.pkl")) 
-        
-        #将fd_net置为不训练
+    model_train = model_train.to(device) 
+    fd_net = fd_Net().to(device)  #退化模型放上
+    #fd_net = fd_net.double() #与数据统一，转化为double进行处理
+    if False == args.fd_train:
         for layer in list(fd_net.parameters()):
             layer.requires_grad=False
-        print_model_weight(-1, fd_net,'fd_net')
-    else:
-        print('进入训练模式:训练fd_net')
-        print_model_weight(-1, model_train,'model_train')
+
+    #打印grad，训练前和训练时
+    print_model_weight(-1, model_train,'model_train')
     print_model_weight(-1, model_image,'model_image')
-    model_train = model_train.to(device) 
-    
     """ Read chunks of events using Pandas """
 
     # Loop through the events and reconstruct images
@@ -219,19 +216,18 @@ if __name__ == "__main__":
                                                          duration_ms=args.window_duration,
                                                          start_index=start_index)
     else:
-        #执行此句，从数据集中读取事件流数据并处理为窗口格式！我们在这之前进行一个退化变换？那就可能会断掉训练、影响原数据
-        #所以我们在处理为窗口格式后再进行变换最好
+        #执行此句，从数据集中读取事件流数据！我们在这之前进行一个退化变换？那就可能会断掉训练、影响原数据
         event_window_iterator = FixedSizeEventReader(path_to_events,options = args , num_events=N, start_index=start_index)
     
     #定义优化器,将两个参数都融入
-    optimizer = torch.optim.Adam([{"params":fd_net.parameters()},
-    {"params":model_train.parameters()}], lr=args.learning_rate)
+    optimizer = torch.optim.Adam([{"params":fd_net.parameters()},{"params":model_train.parameters()}], lr=args.learning_rate)
     if args.fd_train: #只训练fd，则可以去除model_train进行实验
         optimizer = torch.optim.Adam([{"params":fd_net.parameters()}], lr=args.learning_rate)
     else:  #固定fd，只训练model_train
         optimizer = torch.optim.Adam([{"params":model_train.parameters()}], lr=args.learning_rate)
     
     count = 0
+    #bug: 非训练模式下与训练模式一样的时间？why？
     #     训练模式的时间
     if args.train_model:  #训练模式
         #取消计时
@@ -244,30 +240,37 @@ if __name__ == "__main__":
             event_window_iterator = FixedSizeEventReader(path_to_events, options = args , num_events=N, start_index=start_index)
             #遍历每个窗口，对于每个窗口，event_window.shape=(15119, 4),4是指t,x,y,p的四个维度
             for event_window in event_window_iterator: 
-                                     
+                train_event_window = torch.from_numpy(event_window)
+                train_event_window = train_event_window.type(torch.float)
+                train_event_window = train_event_window.to(device)
+                train_event_window.requires_grad = True
+                #退化模型处理
+                train_event_window = fd_net(train_event_window)                        
                 #num_bins=5
                 #每个窗口都要更新这个reconstructor的地方，但调整到这儿，原本输出的很多内容会有点乱
                 reconstructor_train = ImageReconstructor(model_train, height, width, model_train.num_bins, args)
                 reconstructor_image = ImageReconstructor(model_image, height, width, model_image.num_bins, args)
                 last_timestamp = event_window[-1, 0]
-                #此处默认在GPU上跑的，划分体素网格,内部已禁用梯度计算
-                event_tensor = events_to_voxel_grid_pytorch(event_window,
+                    #此处默认在GPU上跑的，划分体素网格,内部已禁用梯度计算
+                image_event_tensor = events_to_voxel_grid_pytorch(event_window,
                                                             num_bins=model_train.num_bins,
                                                             width=width,
                                                             height=height,
                                                             device=device)
-                num_events_in_window = event_window.shape[0] #15119
-                image = reconstructor_image.update_reconstruction(event_tensor, start_index + num_events_in_window, last_timestamp)
-                image = image.type(torch.float).to(device)
-
-                train_event_tensor = event_tensor.type(torch.float)
-                train_event_tensor = train_event_tensor.to(device)
-                train_event_tensor.requires_grad = True
-                # torch.set_printoptions(profile="full")
-                # print(train_event_tensor.shape) #torch.Size([5, 180, 240])
-                #退化模型处理
-                train_event_tensor = fd_net(train_event_tensor)   
+                train_event_tensor = events_to_voxel_grid_pytorch(train_event_window,
+                                                            num_bins=model_train.num_bins,
+                                                            width=width,
+                                                            height=height,
+                                                            device=device)
+                    #'''这里可以用论文辅助理解events_to_voxel_grid_pytorch，对于num_bins也在论文里有解释！！！'''
                 
+                num_events_in_window = event_window.shape[0] #15119
+                #类的方法可能有问题，实例化为对象可能只适合eval()
+                
+                image = reconstructor_image.update_reconstruction(image_event_tensor, start_index + num_events_in_window, last_timestamp)
+                image = image.type(torch.float).to(device)
+                #此时打印model_train，发现所有参数的requires_grad都是True
+                #此时打印model_image，发现所有参数的requires_grad都是False
                 output = reconstructor_train.update_reconstruction(train_event_tensor, start_index + num_events_in_window, last_timestamp)
                 output = output.type(torch.float).to(device)
                 
@@ -288,20 +291,15 @@ if __name__ == "__main__":
             # print_model_weight(epoch, model_train,'model_train')
             # print_model_weight(epoch, model_image,'model_image')
             # #print_model(epoch, model_train)
-
-            print_model_weight(epoch, model_image,'model_image')
+            
             if args.fd_train: 
                 print(epoch,'fd_train loss:',loss.item())
                 loss_file = open(join(args.output_folder, 'fd_loss.txt'), 'a')
                 loss_file.write('epoch:{}  loss:{:.8f}\n'.format(epoch, loss))
-                #此时看E2VID网络的情况
-                print_model_weight(epoch, model_train,'model_train')
             else:
                 print(epoch,'E2VID_train loss:',loss.item())
                 loss_file = open(join(args.output_folder, 'E2VID_loss.txt'), 'a')
                 loss_file.write('epoch:{}  loss:{:.8f}\n'.format(epoch, loss))
-                #此时看fd_net网络的情况
-                print_model_weight(epoch, fd_net,'fd_net')
     else:
         reconstructor = ImageReconstructor(model_train, height, width, model_train.num_bins, args)
         with CudaTimer('Processing entire dataset'):  #有计时作用
@@ -340,8 +338,8 @@ if __name__ == "__main__":
         beijing_now = utc_now.astimezone(SHA_TZ)
         ts = str(beijing_now)
         if args.fd_train:  #此时训练fd
-            torch.save(fd_net, 'train/trained_fd_model/'+ts+'model.pth')   
-            torch.save(fd_net.state_dict(), 'train/trained_fd_model/'+ts+'model_param.pkl')
+            torch.save(model_train, 'train/trained_fd_model/'+ts+'model.pth')   
+            torch.save(model_train.state_dict(), 'train/trained_fd_model/'+ts+'model_param.pkl')
             print("fd模型训练完成，已保存模型内容")
         else:     #此时训练E2VID
             torch.save(model_train, 'train/trained_E2VID_model/'+ts+'model.pth')   
