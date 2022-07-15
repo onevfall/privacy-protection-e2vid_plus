@@ -58,17 +58,20 @@ class EventPreprocessor:
     Utility class to preprocess event tensors.
     Can perform operations such as hot pixel removing, event tensor normalization,
     or flipping the event tensor.
+        可以执行一些操作，如去除热像素，事件张量的正常化。或翻转事件张量。
+    疑问：什么是去除热像素？
     """
 
     def __init__(self, options):
-
-        print('== Event preprocessing ==')
+        if options.train_model == False:
+            print('== Event preprocessing ==')
         self.no_normalize = options.no_normalize
         if self.no_normalize:
             print('!!Will not normalize event tensors!!')
         else:
-            print('Will normalize event tensors.')
-
+            if options.train_model == False:
+                print('Will normalize event tensors.')
+        
         self.hot_pixel_locations = []
         if options.hot_pixels_file:
             try:
@@ -81,7 +84,7 @@ class EventPreprocessor:
         if self.flip:
             print('Will flip event tensors.')
 
-    def __call__(self, events):
+    def __call__(self, events):  #被调用了的，进行normalize
 
         # Remove (i.e. zero out) the hot pixels
         for x, y in self.hot_pixel_locations:
@@ -95,16 +98,18 @@ class EventPreprocessor:
         # the mean and stddev of the nonzero values in the tensor are equal to (0.0, 1.0)
         if not self.no_normalize:
             with CudaTimer('Normalization'):
-                nonzero_ev = (events != 0)
+                nonzero_ev = (events != 0)  #过滤器,值为True，False
+
                 num_nonzeros = nonzero_ev.sum()
                 if num_nonzeros > 0:
                     # compute mean and stddev of the **nonzero** elements of the event tensor
                     # we do not use PyTorch's default mean() and std() functions since it's faster
                     # to compute it by hand than applying those funcs to a masked array
-                    mean = events.sum() / num_nonzeros
-                    stddev = torch.sqrt((events ** 2).sum() / num_nonzeros - mean ** 2)
+                    mean = events.sum() / num_nonzeros #直接将sum除以非零数
+                    stddev = torch.sqrt((events ** 2).sum() / num_nonzeros - mean ** 2) #标准差
                     mask = nonzero_ev.float()
-                    events = mask * (events - mean) / stddev
+                    #转为浮点数0，1了
+                    events = mask * (events - mean) / stddev #此处为矩阵点乘
 
         return events
 
@@ -118,37 +123,74 @@ class IntensityRescaler:
 
     def __init__(self, options):
         self.auto_hdr = options.auto_hdr
-        self.intensity_bounds = deque()
+        self.intensity_bounds_min = torch.tensor(-99).reshape(1) # self.intensity_bounds=deque()为py的类list容器，现改为空tensor
+        self.intensity_bounds_max = torch.tensor(-99).reshape(1) #仅有1维，特殊的初始化标识
+        self.intensity_bounds=deque()
         self.auto_hdr_median_filter_size = options.auto_hdr_median_filter_size
         self.Imin = options.Imin
         self.Imax = options.Imax
-
+        self.train_model = options.train_model
     def __call__(self, img):
         """
         param img: [1 x 1 x H x W] Tensor taking values in [0, 1]
         """
         if self.auto_hdr:
+            #下面为了实现tensor连续训练，将np实现转为pytorch的
             with CudaTimer('Compute Imin/Imax (auto HDR)'):
-                Imin = torch.min(img).item()
-                Imax = torch.max(img).item()
+                
+                #原numpy的残余代码
+                # # adjust image dynamic range (i.e. its contrast)
+                #  #扔掉最开始的那个
+                # if len(self.intensity_bounds) > self.auto_hdr_median_filter_size:
+                #     self.intensity_bounds.popleft() 
+                
+                # self.intensity_bounds.append((Imin, Imax))
+                # self.Imin = np.median([rmin for rmin, rmax in self.intensity_bounds]) #np实现
+                # self.Imax = np.median([rmax for rmin, rmax in self.intensity_bounds])
+                if self.train_model:
+                    Imin = torch.min(img)#.item()  #此处将pytorch的转为了python的
+                    Imax = torch.max(img)#.item()
+                    
+                    # ensure that the range is at least 0.1
+                    Imin = torch.clamp(Imin, 0.0, 0.45)    #np.clip(Imin, 0.0, 0.45)
+                    Imax = torch.clamp(Imax, 0.55, 1.0) # np.clip(Imax, 0.55, 1.0)
+                    Imin = Imin.reshape(1) #新加，适应torch方法
+                    Imax = Imax.reshape(1)
+                    #数据大了的话，扔掉左边的
+                    if self.intensity_bounds_min.shape[0] > self.auto_hdr_median_filter_size:
+                        self.intensity_bounds_min = self.intensity_bounds_min[:,1:]
+                        self.intensity_bounds_max = self.intensity_bounds_max[:,1:]
+                    
+                    if self.intensity_bounds_min[0] == -99:
+                        self.intensity_bounds_min = Imin
+                    else:
+                        self.intensity_bounds_min = torch.cat(self.intensity_bounds_min,Imin)
+                    if self.intensity_bounds_max[0] == -99:
+                        self.intensity_bounds_max = Imax
+                    else:
+                        self.intensity_bounds_max = torch.cat(self.intensity_bounds_max,Imax)
+                    self.Imin = torch.median(self.intensity_bounds_min)
+                    self.Imax = torch.median(self.intensity_bounds_max)
 
-                # ensure that the range is at least 0.1
-                Imin = np.clip(Imin, 0.0, 0.45)
-                Imax = np.clip(Imax, 0.55, 1.0)
-
-                # adjust image dynamic range (i.e. its contrast)
-                if len(self.intensity_bounds) > self.auto_hdr_median_filter_size:
-                    self.intensity_bounds.popleft()
-
-                self.intensity_bounds.append((Imin, Imax))
-                self.Imin = np.median([rmin for rmin, rmax in self.intensity_bounds])
-                self.Imax = np.median([rmax for rmin, rmax in self.intensity_bounds])
-
+                else:  #eval模式
+                    Imin = torch.min(img).item()  #此处将pytorch的转为了python的
+                    Imax = torch.max(img).item()
+                    
+                    # ensure that the range is at least 0.1
+                    Imin = np.clip(Imin, 0.0, 0.45)
+                    Imax = np.clip(Imax, 0.55, 1.0)
+                    # adjust image dynamic range (i.e. its contrast)
+                    if len(self.intensity_bounds) > self.auto_hdr_median_filter_size:
+                        self.intensity_bounds.popleft() 
+                    
+                    self.intensity_bounds.append((Imin, Imax))
+                    self.Imin = np.median([rmin for rmin, rmax in self.intensity_bounds]) #np实现
+                    self.Imax = np.median([rmax for rmin, rmax in self.intensity_bounds])
         with CudaTimer('Intensity rescaling'):
             img = 255.0 * (img - self.Imin) / (self.Imax - self.Imin)
             img.clamp_(0.0, 255.0)
-            img = img.byte()  # convert to 8-bit tensor
-
+            if self.train_model == False:
+                img = img.byte()  # convert to 8-bit tensor非训练模式
         return img
 
 
@@ -165,7 +207,55 @@ class ImageWriter:
         self.save_events = options.show_events
         self.event_display_mode = options.event_display_mode
         self.num_bins_to_show = options.num_bins_to_show
-        print('== Image Writer ==')
+        if options.train_model == False:
+            print('== Image Writer ==')
+            if self.output_folder:
+                ensure_dir(self.output_folder)
+                ensure_dir(join(self.output_folder, self.dataset_name))
+                print('Will write images to: {}'.format(join(self.output_folder, self.dataset_name)))
+                self.timestamps_file = open(join(self.output_folder, self.dataset_name, 'timestamps.txt'), 'a')
+
+                if self.save_events:
+                    self.event_previews_folder = join(self.output_folder, self.dataset_name, 'events')
+                    ensure_dir(self.event_previews_folder)
+                    print('Will write event previews to: {}'.format(self.event_previews_folder))
+
+                atexit.register(self.__cleanup__)
+            else:
+                print('Will not write images to disk.')
+
+    def __call__(self, img, event_tensor_id, stamp=None, events=None):
+        if not self.output_folder:
+            return
+
+        if self.save_events and events is not None:
+            event_preview = make_event_preview(events, mode=self.event_display_mode,
+                                               num_bins_to_show=self.num_bins_to_show)
+            cv2.imwrite(join(self.event_previews_folder,
+                             'events_{:010d}.png'.format(event_tensor_id)), event_preview)
+
+        cv2.imwrite(join(self.output_folder, self.dataset_name,
+                         'frame_{:010d}.png'.format(event_tensor_id)), img)
+        if stamp is not None:
+            self.timestamps_file.write('{:.18f}\n'.format(stamp))
+
+    def __cleanup__(self):
+        if self.output_folder:
+            self.timestamps_file.close()
+
+
+class TrainModel:
+    ''''
+    我的训练模型部分的代码
+    '''
+    def __init__(self, options):
+
+        self.output_folder = options.output_folder
+        self.dataset_name = options.dataset_name
+        self.save_events = options.show_events
+        self.event_display_mode = options.event_display_mode
+        self.num_bins_to_show = options.num_bins_to_show
+        print('== Trian ==')
         if self.output_folder:
             ensure_dir(self.output_folder)
             ensure_dir(join(self.output_folder, self.dataset_name))
@@ -199,8 +289,6 @@ class ImageWriter:
     def __cleanup__(self):
         if self.output_folder:
             self.timestamps_file.close()
-
-
 class ImageDisplay:
     """
     Utility class to display image reconstructions
@@ -289,8 +377,9 @@ class ImageFilter:
     def __call__(self, img):
 
         if self.bilateral_filter_sigma:
-            with Timer('Bilateral filter (sigma={:.2f})'.format(self.bilateral_filter_sigma)):
-                filtered_img = np.zeros_like(img)
+            with CudaTimer('Bilateral filter (sigma={:.2f})'.format(self.bilateral_filter_sigma)):
+                #filtered_img = np.zeros_like(img)
+                filtered_img = torch.zeros_like(img)
                 filtered_img = cv2.bilateralFilter(
                     img, 5, 25.0 * self.bilateral_filter_sigma, 25.0 * self.bilateral_filter_sigma)
                 img = filtered_img
@@ -319,9 +408,11 @@ class CropParameters:
         self.height = height
         self.width = width
         self.num_encoders = num_encoders
-        self.width_crop_size = optimal_crop_size(self.width, num_encoders)
+        #width_crop_size就是要扩充到的面积
+        self.width_crop_size = optimal_crop_size(self.width, num_encoders) #为何这个是最优？
         self.height_crop_size = optimal_crop_size(self.height, num_encoders)
 
+        #padding_top就是依据扩充目标和扩前初始大小来确定的
         self.padding_top = ceil(0.5 * (self.height_crop_size - self.height))
         self.padding_bottom = floor(0.5 * (self.height_crop_size - self.height))
         self.padding_left = ceil(0.5 * (self.width_crop_size - self.width))
@@ -395,7 +486,7 @@ def merge_channels_into_color_image(channels):
     :return a color image at full resolution
     """
 
-    with Timer('Merge color channels'):
+    with CudaTimer('Merge color channels'):
 
         assert('R' in channels)
         assert('G' in channels)
@@ -459,7 +550,7 @@ def events_to_voxel_grid(events, num_bins, width, height):
     pols = events[:, 3]
     pols[pols == 0] = -1  # polarity should be +1 / -1
 
-    tis = ts.astype(np.int)
+    tis = ts.astype(np.int)  #转换
     dts = ts - tis
     vals_left = pols * (1.0 - dts)
     vals_right = pols * dts
@@ -495,7 +586,7 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
     assert(width > 0)
     assert(height > 0)
 
-    with torch.no_grad():
+    with torch.no_grad(): #禁用梯度计算，有利于减少内存消耗
 
         events_torch = torch.from_numpy(events)
         with DeviceTimer('Events -> Device (voxel grid)'):
@@ -509,7 +600,7 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
             first_stamp = events_torch[0, 0]
             deltaT = last_stamp - first_stamp
 
-            if deltaT == 0:
+            if deltaT == 0: #防止遇上0导致错误
                 deltaT = 1.0
 
             events_torch[:, 0] = (num_bins - 1) * (events_torch[:, 0] - first_stamp) / deltaT
@@ -519,19 +610,23 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
             pols = events_torch[:, 3].float()
             pols[pols == 0] = -1  # polarity should be +1 / -1
 
-            tis = torch.floor(ts)
-            tis_long = tis.long()
-            dts = ts - tis
+            tis = torch.floor(ts)  #向下取整
+            tis_long = tis.long()  #转为Int64
+            dts = ts - tis         #找到小数
             vals_left = pols * (1.0 - dts.float())
             vals_right = pols * dts.float()
 
-            valid_indices = tis < num_bins
-            valid_indices &= tis >= 0
+            valid_indices = tis < num_bins #原句
+            valid_indices &= tis >= 0   #将tis>0的值(bool型)与valid_indices值进行按位与运算
+            
+
+            #没看懂这部分的内容，体元在操作什么？
+            #dim=0,对进行index选取，进行加和
             voxel_grid.index_add_(dim=0,
                                   index=xs[valid_indices] + ys[valid_indices]
                                   * width + tis_long[valid_indices] * width * height,
                                   source=vals_left[valid_indices])
-
+            #voxel_grid.shape = torch.Size([216000])
             valid_indices = (tis + 1) < num_bins
             valid_indices &= tis >= 0
 
@@ -539,7 +634,7 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
                                   index=xs[valid_indices] + ys[valid_indices] * width
                                   + (tis_long[valid_indices] + 1) * width * height,
                                   source=vals_right[valid_indices])
-
+            #voxel_grid.shape = torch.Size([216000])
+            
         voxel_grid = voxel_grid.view(num_bins, height, width)
-
     return voxel_grid

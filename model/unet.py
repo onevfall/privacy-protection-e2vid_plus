@@ -41,7 +41,7 @@ class BaseUNet(nn.Module):
         assert(self.num_output_channels > 0)
 
         self.encoder_input_sizes = []
-        for i in range(self.num_encoders):
+        for i in range(self.num_encoders): #迭代num_encoders次
             self.encoder_input_sizes.append(self.base_num_channels * pow(2, i))
 
         self.encoder_output_sizes = [self.base_num_channels * pow(2, i + 1) for i in range(self.num_encoders)]
@@ -53,7 +53,7 @@ class BaseUNet(nn.Module):
         for i in range(self.num_residual_blocks):
             self.resblocks.append(ResidualBlock(self.max_num_channels, self.max_num_channels, norm=self.norm))
 
-    def build_decoders(self):
+    def build_decoders(self):  #解码，写得真简洁，太牛了...
         decoder_input_sizes = list(reversed([self.base_num_channels * pow(2, i + 1) for i in range(self.num_encoders)]))
 
         self.decoders = nn.ModuleList()
@@ -79,7 +79,7 @@ class UNet(BaseUNet):
         self.encoders = nn.ModuleList()
         for input_size, output_size in zip(self.encoder_input_sizes, self.encoder_output_sizes):
             self.encoders.append(ConvLayer(input_size, output_size, kernel_size=5,
-                                           stride=2, padding=2, norm=self.norm))
+                                           stride=2, padding=2, norm=self.norm)) #Unet的规模减半
 
         self.build_resblocks()
         self.build_decoders()
@@ -175,4 +175,4 @@ class UNetRecurrent(BaseUNet):
         # tail
         img = self.activation(self.pred(self.apply_skip_connection(x, head)))
 
-        return img, states
+        return img, states  #states如何记录

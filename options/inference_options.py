@@ -1,10 +1,10 @@
 def set_inference_options(parser):
 
-    parser.add_argument('-o', '--output_folder', default=None, type=str)  # if None, will not write the images to disk
-    parser.add_argument('--dataset_name', default='reconstruction', type=str)
+    parser.add_argument('-o', '--output_folder', default='train/myRun/', type=str)  # if None, will not write the images to disk
+    parser.add_argument('--dataset_name', default='after_fd_reconstruction', type=str)
 
     parser.add_argument('--use_gpu', dest='use_gpu', action='store_true')
-    parser.set_defaults(use_gpu=True)
+    parser.set_defaults(use_gpu=True)  
 
     """ Display """
     parser.add_argument('--display', dest='display', action='store_true')
