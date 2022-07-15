@@ -224,7 +224,8 @@ if __name__ == "__main__":
         event_window_iterator = FixedSizeEventReader(path_to_events,options = args , num_events=N, start_index=start_index)
     
     #定义优化器,将两个参数都融入
-    optimizer = torch.optim.Adam([{"params":fd_net.parameters()},{"params":model_train.parameters()}], lr=args.learning_rate)
+    optimizer = torch.optim.Adam([{"params":fd_net.parameters()},
+    {"params":model_train.parameters()}], lr=args.learning_rate)
     if args.fd_train: #只训练fd，则可以去除model_train进行实验
         optimizer = torch.optim.Adam([{"params":fd_net.parameters()}], lr=args.learning_rate)
     else:  #固定fd，只训练model_train
