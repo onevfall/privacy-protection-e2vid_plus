@@ -21,8 +21,12 @@ class ImageReconstructor:
         self.width = width
         self.num_bins = num_bins
         self.train_model = options.train_model
-
+        self.options = options
         self.initialize(self.height, self.width, options)
+
+    # def hook_fn(grad):
+    #     grad_file = open(join(self.options.output_folder, 'nonleaf_grad.txt'), 'a')
+    #     grad_file.write('grad:{}\n'.format(grad))
 
     def initialize(self, height, width, options):
         if self.train_model == False:     
@@ -69,11 +73,14 @@ class ImageReconstructor:
                     events = event_tensor.unsqueeze(dim=0)
                     #events.shape由torch.Size([5, 180, 240])转为torch.Size([1, 5, 180, 240])
                     events = events.to(self.device)
-                    
+                # grad_file = open(join(self.options.output_folder, 'middle_events_grad.txt'), 'a')
+                # grad_file.write('events grad:{}\n'.format(events.grad))
+                #print('events grad:',events.grad)  #打印为None
                 #预处理：去除热像素，事件张量的正常化。或翻转事件张量。
                 events = self.event_preprocessor(events)  #此处调用__call__函数
                 #events.shape: torch.Size([1, 5, 180, 240])
-                
+
+                    
                 # Resize tensor to [1 x C x crop_size x crop_size] by applying zero padding
                 events_for_each_channel = {'grayscale': self.crop.pad(events)} #进行裁剪和微调
 
@@ -113,7 +120,8 @@ class ImageReconstructor:
                     # Intensity rescaler (on GPU)
                     new_predicted_frame = self.intensity_rescaler(new_predicted_frame)
 
-                    
+                    # print('new_predicted_frame grad:',new_predicted_frame.grad)
+
                     with Timer('Tensor (GPU) -> NumPy (CPU)'):
                         reconstructions_for_each_channel[channel] = new_predicted_frame[0, 0, crop.iy0:crop.iy1,
                                                                                         crop.ix0:crop.ix1]# .cpu().numpy() 去掉这，保持torch
@@ -173,6 +181,7 @@ class ImageReconstructor:
                         
                         # Intensity rescaler (on GPU)
                         new_predicted_frame = self.intensity_rescaler(new_predicted_frame)
+
 
                         
                         with Timer('Tensor (GPU) -> NumPy (CPU)'):

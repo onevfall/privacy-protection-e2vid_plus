@@ -23,17 +23,22 @@ import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 torch.set_printoptions(profile="full")  #完整打印
 
+def hook_fn(grad):
+    grad_file = open(join(args.output_folder, 'nonleaf_grad.txt'), 'a')
+    grad_file.write('grad:{}\n'.format(grad))
 def print_model_grad(epoch, model, str):
     grad_file = open(join(args.output_folder, 'train_grad.txt'), 'a')
     grad_file.write('{}:\n'.format(str))
     grad_file.write('epoch:{}\n'.format(epoch))
-    for name, weight in model.named_parameters():
-        if weight.requires_grad: #True
-            # print("weight grad:", weight.grad) # 打印梯度，看是否丢失
+    count = 0
+    for name, param in model.named_parameters():
+        #while(count<2): #只打印两轮
+        if param.requires_grad: #True
             # # 直接打印梯度会出现太多输出，可以选择打印梯度的均值、极值，但如果梯度为None会报错
-            # print("weight.grad:", weight.grad.mean(), weight.grad.min(), weight.grad.max())
-            grad_file.write('weight grad:{}\n'.format(weight.grad))
-            #grad_file.write('weight grad:{} {} {}\n'.format(weight.grad.mean(), weight.grad.min(), weight.grad.max() )) 
+            # print("param.grad:", param.grad.mean(), param.grad.min(), param.grad.max())
+            count += 1
+            grad_file.write('param{} grad:{}\n'.format(name,param.grad))
+            # grad_file.write('param grad mean:{} min:{} max:{}\n'.format(param.grad.mean(), param.grad.min(), param.grad.max() )) 
     #file.close()
 def print_model_weight(epoch, model, str):
     weight_file = open(join(args.output_folder, 'train_weight.txt'), 'a')
@@ -42,7 +47,7 @@ def print_model_weight(epoch, model, str):
     count = 0
     for name, weight in model.named_parameters():
         count += 1
-        if count <= 3:
+        if count <= 1: #只输出一次，减少输出量
             weight_file.write('weight:{}\n'.format(weight))
  # 1. 根据网络层的不同定义不同的初始化方式     
 def weight_init(m):
@@ -60,27 +65,26 @@ def weight_init(m):
         nn.init.constant_(m.weight, 1)
         nn.init.constant_(m.bias, 0)
 def postprocess(data): #数据恢复原有格式
-    
-    #三列，第一列为0-240，第二列为0-180，第三列为0或1
+    #三列，第一列为0-240，第二列为0-179，第三列为0或1
     #xs
     xs = data[:, 0]
-    max_xs = torch.max(xs)
-    min_xs = torch.min(xs)
+    max_xs = xs.max().clone().detach() #这样使用解决
+    min_xs = xs.min().clone().detach() 
     data[:, 0] = (xs - min_xs) / (max_xs - min_xs) * 239  #最大值不是240，是239.......
+    data[:, 0] = torch.floor(data[:, 0])  #向下取整
     #ys
     ys = data[:, 1]
-    max_ys = torch.max(ys)
-    min_ys = torch.min(ys)
-    # print('min_ys',type(min_ys))
-    # print('min_ys',min_ys)
+    max_ys = ys.max().clone().detach()  #torch.max(ys)
+    min_ys = ys.min().clone().detach()  #torch.min(ys) 
     data[:, 1] = (ys - min_ys) / (max_ys - min_ys) * 179    
-
+    data[:, 1] = torch.floor(data[:, 1])
     #pols维度,回归到0、1
     pols = data[:, 2]
     mean_pols = torch.mean(pols)
     
-    #pols = [1 if x > mean_pols else 0 for x in pols ] 列表推导式，是python的处理
+    #pols = [1 if x > mean_pols else 0 for x in pols ] 列表推导式，是python的处理,不可用
     pols = pols > mean_pols  #输出均为True，False这种,看结果确实是回到了0、1
+
     data[:, 2] = pols
     output = data
     return output
@@ -88,30 +92,24 @@ class fd_Net(nn.Module):
     def __init__(self):
         super(fd_Net,self).__init__()
         #1.是否会使用卷积层 2.fc层如何定义维度数量 3.此处只对于x,y,p做一个训练
-
         self.fc1 = nn.Linear(3,64)
         self.fc2 = nn.Linear(64,3)
-        self.relu = nn.ReLU()
+        self.relu = nn.ReLU(inplace=False)
         #self.dropout = nn.Dropout(0.5) 加dropout会报错
     def forward(self,input):
-
+        #print('input.requires_grad:',input.requires_grad)
         input_1 = input[:,:1] #此列数据不变
-        x = input[:,1:]
-        # print(x.shape)
-        x = self.fc1(x)
-        x1 = self.relu(x.clone()) #使用clone防止占位，之前是使用ReLU
+        #input_1.register_hook(hook_fn)  #这部分居然input_1有grad，本不应该有？
+        x0 = input[:,1:]
+        x = self.fc1(x0)
+        #x.register_hook(hook_fn)
+        x1 = self.relu(x) #使用clone防止占位，之前是使用ReLU
         #x = self.dropout(x)
         x1 = self.fc2(x1)
         x1 = postprocess(x1)
+        
+        #x1.register_hook(hook_fn)  #grad.shape:torch.Size([15119, 3])
         output = torch.cat([input_1,x1],dim=1)
-        # print('第二列：','max:',input[:,1].max(),'min:',input[:,1].min())
-        # print('第三列：','max:',input[:,2].max(),'min:',input[:,2].min())
-        # print('第四列：','max:',input[:,3].max(),'min:',input[:,3].min())#,'all:',input[:,3])
-        # print('output：')
-        # print('第二列：','max:',output[:,1].max(),'min:',output[:,1].min())
-        # print('第三列：','max:',output[:,2].max(),'min:',output[:,2].min())
-        # print('第四列：','max:',output[:,3].max(),'min:',output[:,3].min())
-       
         return output
     
 if __name__ == "__main__":
@@ -140,7 +138,7 @@ if __name__ == "__main__":
     #若fd_train为true，则固定E2VID，训练退化fd_net；若为false，则固定fd_net,训练E2VID
     parser.add_argument('--fd_train', dest='fd_train', action='store_true') 
     parser.set_defaults(fd_train=False)  
-    parser.add_argument("--epoches", default=3, type=int, help="The number of epochs")
+    parser.add_argument("--epoches", default=2, type=int, help="The number of epochs")
     parser.add_argument("--learning_rate", default=0.001, type=float, help="learning_rate")
 
     set_inference_options(parser)
@@ -184,21 +182,29 @@ if __name__ == "__main__":
     if False == args.train_model: #加载训练的模型权重，进行测试
         #model = torch.load('train/trained_model/model.pth')
         model_train.load_state_dict(torch.load("train/trained_E2VID_model/2022-05-19 01:34:28.303251+08:00model_param.pkl")) 
-        print('已加载训练模型权重')
+        print('已加载训练模型权重，开始测试')
         model_train.eval()
     elif False == args.fd_train: #若fd非train模式，则此时是训练E2VID模型，那么随机初始化；若fd为train模式，则E2VID直接加载与image一样的
         model_train.apply(weight_init)  #随机初始化,打乱权重
         model_train.train()
+        print("对E2VID模型进入训练模式")
+    else:
+        print("对fd_net进入训练模式")
     model_train = model_train.to(device) 
     fd_net = fd_Net().to(device)  #退化模型放上
+    fd_net.apply(weight_init)  #加载权重
+    fd_net.train()  #开启训练模式
     #fd_net = fd_net.double() #与数据统一，转化为double进行处理
     if False == args.fd_train:
         for layer in list(fd_net.parameters()):
             layer.requires_grad=False
 
     #打印grad，训练前和训练时
-    print_model_weight(-1, model_train,'model_train')
-    print_model_weight(-1, model_image,'model_image')
+    # print_model_weight(-1, model_train,'model_train')
+    # print_model_weight(-1, fd_net,'fd_net')
+    
+    # print_model_grad(-1,model_train,'model_train')
+    # print_model_grad(-1, fd_net,'fd_net')
     """ Read chunks of events using Pandas """
     # Loop through the events and reconstruct images
     N = args.window_size  #一个window的大小
@@ -241,7 +247,6 @@ if __name__ == "__main__":
         optimizer = torch.optim.Adam([{"params":model_train.parameters()}], lr=args.learning_rate)
     
     count = 0
-    #bug: 非训练模式下与训练模式一样的时间？why？
     #     训练模式的时间
     if args.train_model:  #训练模式
         with torch.autograd.set_detect_anomaly(True):    
@@ -255,43 +260,41 @@ if __name__ == "__main__":
                 event_window_iterator = FixedSizeEventReader(path_to_events, options = args , num_events=N, start_index=start_index)
                 #遍历每个窗口，对于每个窗口，event_window.shape=(15119, 4),4是指t,x,y,p的四个维度
                 for event_window in event_window_iterator:  
-                    train_event_window = torch.from_numpy(event_window)
-                    train_event_window = train_event_window.type(torch.float)
-                    train_event_window = train_event_window.to(device)
-                    train_event_window.requires_grad = True
+                    old_train_event_window = torch.from_numpy(event_window)
+                    old_train_event_window = old_train_event_window.type(torch.float)
+                    old_train_event_window = old_train_event_window.to(device)
+                    #old_train_event_window.requires_grad = True
                     #退化模型处理
-                    train_event_window = fd_net(train_event_window)                        
+                    train_event_window = fd_net(old_train_event_window) 
+                    # print('old_train_event_window.requires_grad:',old_train_event_window.requires_grad)                   
+                    # print('train_event_window.requires_grad:',train_event_window.requires_grad)
+                    #train_event_window.register_hook(hook_fn)  
+                    #print('train_event_window:',train_event_window.requires_grad)                     
                     #num_bins=5
                     #每个窗口都要更新这个reconstructor的地方，但调整到这儿，原本输出的很多内容会有点乱
                     reconstructor_train = ImageReconstructor(model_train, height, width, model_train.num_bins, args)
                     reconstructor_image = ImageReconstructor(model_image, height, width, model_image.num_bins, args)
                     last_timestamp = event_window[-1, 0]
-                    #此处默认在GPU上跑的，划分体素网格,内部已禁用梯度计算
+                    
                     image_event_tensor = events_to_voxel_grid_pytorch(event_window,
                                                                 num_bins=model_train.num_bins,
                                                                 width=width,
                                                                 height=height,
                                                                 device=device)
+                    #此处默认在GPU上跑的，划分体素网格,对于train模式，内部不禁用梯度计算
                     train_event_tensor = events_to_voxel_grid_pytorch(train_event_window,
                                                                 num_bins=model_train.num_bins,
                                                                 width=width,
                                                                 height=height,
                                                                 device=device)
-                        #'''这里可以用论文辅助理解events_to_voxel_grid_pytorch，对于num_bins也在论文里有解释！！！'''
-                    #print('train_event_window',train_event_window)
-                    # print('image_event_tensor:',image_event_tensor)
                     #print('train_event_tensor:',train_event_tensor.requires_grad) #注意到此处打印出的tensor没有跟grad
+                    
                     num_events_in_window = event_window.shape[0] #15119
                     
-                    
                     image = reconstructor_image.update_reconstruction(image_event_tensor, start_index + num_events_in_window, last_timestamp)
-                    #print('image',image) 注意到此处打印出的tensor没有跟grad
-                    image = image.type(torch.float).to(device)
-                    #此时打印model_train，发现所有参数的requires_grad都是True
-                    #此时打印model_image，发现所有参数的requires_grad都是False
-                    output = reconstructor_train.update_reconstruction(train_event_tensor, start_index + num_events_in_window, last_timestamp)
-                    output = output.type(torch.float).to(device)
                     
+                    output = reconstructor_train.update_reconstruction(train_event_tensor, start_index + num_events_in_window, last_timestamp)
+
                     #image.shape: torch.Size([180, 240])
                     #output.shape: torch.Size([180, 240])
                     
@@ -303,16 +306,20 @@ if __name__ == "__main__":
                     #反向传播
                     optimizer.zero_grad()
                     loss.backward()
+
+                    #print('output grad:',output.grad)
+                    # print(train_event_window.is_leaf)
+                    # print('train_event_window grad:',train_event_window.grad.shape)
+
                     optimizer.step()
                     
-                    print('loss:',loss)  #有grad
-                    
                     start_index += num_events_in_window  #下一个窗口
-                # #打印grad，训练前和训练时
+                # #打印weight，训练前和训练时
                 # print_model_weight(epoch, model_train,'model_train')
-                # print_model_weight(epoch, model_image,'model_image')
-                # #print_model(epoch, model_train)
+                # print_model_weight(epoch, fd_net,'fd_net')
                 
+                # print_model_grad(epoch,model_train,'model_train')
+                print_model_grad(epoch, fd_net,'fd_net')
                 if args.fd_train: 
                     print(epoch,'fd_train loss:',loss.item())
                     loss_file = open(join(args.output_folder, 'fd_loss.txt'), 'a')

@@ -567,7 +567,9 @@ def events_to_voxel_grid(events, num_bins, width, height):
 
     return voxel_grid
 
-
+def hook_fn(grad):
+    grad_file = open('nonleaf_grad.txt', 'a')
+    grad_file.write('grad:{}\n'.format(grad))
 def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
     """
     Build a voxel grid with bilinear interpolation in the time domain from a set of events.
@@ -601,24 +603,41 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
         
         # events_torch = torch.from_numpy(events)
         events_torch = events
-        with torch.no_grad():
-        # if 1:
+        #with torch.no_grad(): #为了训练，作为中间层的此处应该不能使用禁用梯度
+        if 1:
             with DeviceTimer('Voxel grid voting'):
-                voxel_grid = torch.zeros(num_bins, height, width, dtype=torch.float32, device=device).flatten()
+                voxel_grid = torch.zeros(num_bins, height, width, dtype=torch.float32, device=device)
+                voxel_grid = voxel_grid.flatten()
+                
+                # print('voxel_grid.requires_grad:',voxel_grid.requires_grad)
+                #voxel_grid.requires_grad: False 新创建的叶节点，默认是属于false的
+                # print('events_torch.requires_grad:',events_torch.requires_grad)
+                # events_torch.requires_grad: True
+
+                #print('voxel_grid is_leaf:',voxel_grid.is_leaf,'  voxel_grid.grad_fn:',voxel_grid.grad_fn)
+                #voxel_grid is_leaf: True   voxel_grid.grad_fn: None
 
                 # normalize the event timestamps so that they lie between 0 and num_bins
                 last_stamp = events_torch[-1, 0]
                 first_stamp = events_torch[0, 0]
                 deltaT = last_stamp - first_stamp
 
+                #print('events_torch is_leaf:',events_torch.is_leaf,'  events_torch.grad_fn:',events_torch.grad_fn)
+                #events_torch is_leaf: False   events_torch.grad_fn: <CopySlices object at 0x7f37be55d6d0>
+
                 if deltaT == 0: #防止遇上0导致错误
                     deltaT = 1.0
 
                 events_torch[:, 0] = (num_bins - 1) * (events_torch[:, 0] - first_stamp) / deltaT
                 ts = events_torch[:, 0]
-                xs = events_torch[:, 1].long()
-                ys = events_torch[:, 2].long()
-                pols = events_torch[:, 3].float()
+                xs = events_torch[:, 1]
+                ys = events_torch[:, 2]  #此时index为非叶节点，但是index_add无法加
+                # xs = events_torch[:, 1].long()
+                # ys = events_torch[:, 2].long() #此时index为叶子节点
+                #.long()相关重写，看看能不能改为运算，前向反向进行自定义。
+
+                #print('events_torch[:, 3].dtype',events_torch[:, 3].dtype)
+                pols = events_torch[:, 3].float()  #此处转换类型没有影响的原因在于本来就是torch.float32在计算
                 
                 pols[pols == 0] = -1  # polarity should be +1 / -1
 
@@ -627,24 +646,34 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
                 dts = ts - tis         #找到小数
                 vals_left = pols * (1.0 - dts.float())
                 vals_right = pols * dts.float()
+                # print('vals_right is_leaf:',vals_right.is_leaf,'  vals_right.grad_fn:',vals_right.grad_fn)
+                # vals_right is_leaf: False   vals_right.grad_fn: <MulBackward0 object at 0x7f9106d697f0>
+                #此处说明了vals_right确实能回传grad的，而唯一与vals_right相关的只有pols和dts，那么这里就只能传回那两列
 
                 valid_indices = tis < num_bins #原句
                 valid_indices =  valid_indices & (tis >= 0)   #将tis>0的值(bool型)与valid_indices值进行按位与运算,防止inplace，则拆开
+                #print('valid_indices is_leaf:',valid_indices.is_leaf,'  valid_indices.grad_fn:',valid_indices.grad_fn)
+                #valid_indices is_leaf: True   valid_indices.grad_fn: None  valid_indices.grad:  None
+
                 #dim=0,对进行index选取，进行加和
                 # print('valid_indices len:',len(valid_indices),'  valid_indices:',valid_indices)
                 # print('xs:',len(xs[valid_indices]))
+
                 index=xs[valid_indices] + ys[valid_indices]* width + tis_long[valid_indices] * width * height
-                
+                print('index is_leaf:',index.is_leaf,'  index.grad_fn:',index.grad_fn)
+                #index is_leaf: True   index.grad_fn: None
+
                 source=vals_left[valid_indices]
-                # print('voxel_grid shape:',voxel_grid.shape)
-                # print('source shape:',source.shape)#' source',source)
-                # print('index shape:',index.shape)
-                # print('index max:',index.max())
-                # print('index min:',index.min())
-                voxel_grid_1= torch.index_add(voxel_grid,dim=0,
+                #print('source is_leaf:',source.is_leaf,'  source.grad_fn:',source.grad_fn)
+                #source is_leaf: False   source.grad_fn: <IndexBackward0 object at 0x7fdfe5cf91c0>
+                voxel_grid_1 = torch.index_add(voxel_grid,dim=0,
                                         index=xs[valid_indices] + ys[valid_indices]
                                         * width + tis_long[valid_indices] * width * height,
                                         source=vals_left[valid_indices])
+                #这里voxel_grid、index都是叶节点，传到这儿直接终止，只有source不是，才能回传
+                #初步构想的解决方案：index变成非叶，要与xs、ys扯上关系
+
+                #voxel_grid_1.grad_fn: <IndexAddBackward0 object at 0x7f5bbd961850>
                 #voxel_grid.shape = torch.Size([216000])
                 valid_indices = (tis + 1) < num_bins
                 valid_indices =  valid_indices & (tis >= 0)
@@ -653,9 +682,12 @@ def events_to_voxel_grid_pytorch(events, num_bins, width, height, device):
                                         index=xs[valid_indices] + ys[valid_indices] * width
                                         + (tis_long[valid_indices] + 1) * width * height,
                                         source=vals_right[valid_indices])
+                #voxel_grid_2.grad_fn: <IndexAddBackward0 object at 0x7f56ca0d7df0>
                 #voxel_grid.shape = torch.Size([216000])
-            
+
             voxel_grid_3 = voxel_grid_2.view(num_bins, height, width)
+            #print('voxel_grid_3.grad_fn:',voxel_grid_3.grad_fn) #<ViewBackward0 object at 0x7ff58dbf4850>
+            #voxel_grid_3.register_hook(hook_fn)
         #voxel_grid.shape=torch.Size([5, 180, 240])
     else: #若为ndarray
         with torch.no_grad(): #禁用梯度计算，有利于减少内存消耗
